@@ -257,6 +257,101 @@ ignored in this case."
          (shrink-window-if-larger-than-buffer window)))
   (or window (selected-window)))
 
+
+;;; Async stack
+
+(defvar org-async--stack nil
+  "Form: (%PROCESS :success %FUN :failure %FUN :timeout %FLOAT :startttime %FLOAT)")
+
+(defvar org-async-timeout 120
+  "Default timeout for a process started via `org-async-queue'.")
+(defvar org-async-check-timeout-interval 1
+  "Check for processes which have exceeded their timeout every this many seconds.")
+
+(defvar org-async--counter 0)
+
+(defun org-async-queue (proc &optional success failure timeout)
+  "Start PROC and register it with callbacks SUCCESS and FAILURE.
+
+PROC can be a process, string, or list.  A string will be run as a shell command,
+with `start-process-shell-command' and a list run using `start-process' with the
+car as the command and the cdr as the arguments.
+
+SUCCESS an FAILURE may either be functions, or strings which will be converted
+to anonymous functions which simply `message' the string.
+
+When PROC succeeds by exiting with an exit code of zero, the function SUCCESS
+will be run with no arguments.  Should PROC fail, or be killed, the function
+FAILURE will be run with no arguments.  If the process runs for more than
+TIMEOUT seconds, it will be killed and FAILURE run.
+"
+  (let ((proc (cond ((processp proc) proc)
+                    ((stringp proc)
+                     (start-process-shell-command
+                      (format "org-async-%d" (cl-incf org-async--counter))
+                      nil proc))
+                    ((consp proc)
+                     (apply #'start-process
+                            (format "org-async-%s-%d" (car proc) (cl-incf org-async--counter))
+                            nil proc))
+                    (t (error "Asycnc process input %S not a recognised format" proc))))
+        (success (cond ((functionp success) success)
+                       ((stringp success)
+                        `(lambda () (message "%s" ,success)))
+                       (t #'ignore)))
+        (failure (cond ((functionp failure) failure)
+                       ((stringp failure)
+                        `(lambda () (message "%s" ,failure)))
+                       (t #'ignore)))
+        (timeout (or timeout org-async-timeout)))
+    (set-process-sentinel proc #'org-async--sentinel)
+    (push (list proc
+                :success success
+                :failure failure
+                :timeout timeout
+                :start-time (float-time))
+          org-async--stack)
+    (org-async--monitor)))
+
+(defun org-async--sentinel (process signal)
+  "Watch PROCESS for death SIGNALs, and call `org-async--cleanup-process' accordingly."
+    (pcase (process-status process)
+      ('exit
+       (org-async--cleanup-process process))
+      ((or 'signal 'failed 'nil)
+       (org-async--cleanup-process process t))))
+
+(defun org-async--cleanup-process (process &optional killed)
+  "Remove PROCESS from the async stack, and run its callback.
+If the exit code of PROCESS is zero and KILLED is non-nil, then
+the success callback is run.  Otherwise, the failure callback is run."
+  (let ((proc-info (cdr (assq process org-async--stack))))
+    (if (and (not killed) (= 0 (process-exit-status process)))
+        (funcall (plist-get proc-info :success))
+      (funcall (plist-get proc-info :failure))))
+  (setq org-async--stack (delq (assq process org-async--stack) org-async--stack)))
+
+(defvar org-async--monitor-scheduled nil)
+(defun org-async--monitor (&optional force)
+  "Check each process against their timeouts, and kill any overdue.
+The only runs when `org-async--monitor-scheduled' is nil, unless FORCE is set.
+Should any processes still be alive after checking the stack, this will run
+itself using a timer in `org-async-check-timeout-interval' seconds."
+  (when (or force (null org-async--monitor-scheduled))
+    (dolist (stack-proc org-async--stack)
+      (if (process-live-p (car stack-proc))
+          (let ((timeout (plist-get (cdr stack-proc) :timeout)))
+            (when (and (numberp timeout)
+                       (< 0 timeout
+                          (- (float-time)
+                             (plist-get (cdr stack-proc) :start-time))))
+              (kill-process (car stack-proc))))
+        (org-async--cleanup-process (car stack-proc))))
+    (if org-async--stack
+        (setq org-async--monitor-scheduled
+              (run-at-time org-async-check-timeout-interval nil #'org-async--monitor t))
+      (setq org-async--monitor-scheduled nil))))
+
 
 
 ;;; File
