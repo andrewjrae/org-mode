@@ -970,6 +970,7 @@ URL `https://orgmode.org/worg/org-tutorials/org-latex-preview.html'."
   :type '(choice
 	  (const :tag "Use listings" t)
 	  (const :tag "Use minted" minted)
+	  (const :tag "Use engrave-faces-latex" engrave)
 	  (const :tag "Export verbatim" nil))
   :safe (lambda (s) (memq s '(t nil minted))))
 
@@ -1134,6 +1135,40 @@ will produce
   :version "26.1"
   :package-version '(Org . "9.0"))
 
+(defcustom org-latex-engraved-code-preamble
+  "\\usepackage{fvextra}
+\\fvset{
+  commandchars=\\\\\\{\\},
+  highlightcolor=white!95!black!80!blue,
+  breaklines=true,
+  breaksymbol=\\color{white!60!black}\\tiny\\ensuremath{\\hookrightarrow}}
+\\renewcommand\\theFancyVerbLine{\\footnotesize\\color{black!40!white}\\arabic{FancyVerbLine}}
+
+\\providecolor{codebackground}{HTML}{f7f7f7}
+\\providecolor{codeborder}{HTML}{f0f0f0}
+
+% TODO have code boxes keep line vertical alignment
+\\usepackage[breakable,xparse]{tcolorbox}
+\\DeclareTColorBox[]{Code}{o}%
+{colback=codebackground, colframe=codeborder,
+  fontupper=\\footnotesize,
+  colupper=EFD,
+  IfNoValueTF={#1}%
+  {boxsep=2pt, arc=2.5pt, outer arc=2.5pt,
+    boxrule=0.5pt, left=2pt}%
+  {boxsep=2.5pt, arc=0pt, outer arc=0pt,
+    boxrule=0pt, leftrule=1.5pt, left=0.5pt},
+  right=2pt, top=1pt, bottom=0.5pt,
+  breakable}"
+  "Preamble content injected when using engrave-faces-latex for source blocks.
+This is relevant when `org-latex-listings' is set to `engraved'.
+
+There is quite a lot of flexibility in what this preamble can be, as long as
+it loads the fvextra package and defines a Code environment (note the capital C)
+which can be later used to wrap Verbatim environments (provided by fvextra)."
+  :group 'org-export-latex
+  :type 'string
+  :package-version '(Org . "9.6"))
 
 ;;;; Compilation
 
@@ -1745,6 +1780,14 @@ holding export options."
      (let ((template (plist-get info :latex-hyperref-template)))
        (and (stringp template)
             (format-spec template spec)))
+     ;; engrave-faces-latex preamble
+     (when (and (eq org-latex-listings 'engave)
+                (org-element-map (plist-get info :parse-tree)
+                    '(src-block inline-src-block) #'identity))
+       (require 'engrave-faces-latex)
+       (concat
+        org-latex-engraved-code-preamble
+        (engrave-faces-latex-gen-preamble)))
      ;; Document start.
      "\\begin{document}\n\n"
      ;; Title command.
@@ -2143,6 +2186,24 @@ contextual information."
 		 (if (string= options "") "" (format "[%s]" options))
 		 mint-lang
 		 code)))
+      ;; Use engrave-faces-latex
+      (engraved
+       (let ((options (org-latex--make-option-string
+                       (plist-get info :latex-minted-options)))
+             code-buffer code)
+         (setq code-buffer
+               (with-temp-buffer
+                 (insert (org-element-property :value inline-src-block))
+                 (funcall (org-src-get-lang-mode
+                           (org-element-property :language inline-src-block)))
+                 (engrave-faces-latex-buffer)))
+         (setq code (with-current-buffer code-buffer
+                      (buffer-string)))
+         (kill-buffer code-buffer)
+         (format "\\Verb%s{%s}"
+                 (if (string= options "") ""
+                   (format "[%s]" options))
+                 code)))
       ;; Use listings package.
       (otherwise
        ;; Maybe translate language's name.
@@ -2983,17 +3044,17 @@ CONTENTS holds the contents of the item.  INFO is a plist holding
 contextual information."
   (when (org-string-nw-p (org-element-property :value src-block))
     (let* ((lang (org-element-property :language src-block))
-	   (caption (org-element-property :caption src-block))
-	   (caption-above-p (org-latex--caption-above-p src-block info))
-	   (label (org-element-property :name src-block))
-	   (custom-env (and lang
-			    (cadr (assq (intern lang)
-					org-latex-custom-lang-environments))))
-	   (num-start (org-export-get-loc src-block info))
-	   (retain-labels (org-element-property :retain-labels src-block))
-	   (attributes (org-export-read-attribute :attr_latex src-block))
-	   (float (plist-get attributes :float))
-	   (listings (plist-get info :latex-listings)))
+           (caption (org-element-property :caption src-block))
+           (caption-above-p (org-latex--caption-above-p src-block info))
+           (label (org-element-property :name src-block))
+           (custom-env (and lang
+                            (cadr (assq (intern lang)
+                                        org-latex-custom-lang-environments))))
+           (num-start (org-export-get-loc src-block info))
+           (retain-labels (org-element-property :retain-labels src-block))
+           (attributes (org-export-read-attribute :attr_latex src-block))
+           (float (plist-get attributes :float))
+           (listings (plist-get info :latex-listings)))
       (cond
        ((or (not lang) (not listings))
         (org-latex-src-block--verbatim src-block info lang caption caption-above-p label
@@ -3003,6 +3064,9 @@ contextual information."
                                      num-start retain-labels attributes float custom-env))
        ((eq listings 'minted)
         (org-latex-src-block--minted src-block info lang caption caption-above-p label
+                                     num-start retain-labels attributes float))
+       ((eq listings 'engraved)
+        (org-latex-src-block--engraved src-block info lang caption caption-above-p label
                                        num-start retain-labels attributes float))
        (t
         (org-latex-src-block--listings src-block info lang caption caption-above-p label
@@ -3116,6 +3180,79 @@ and FLOAT are extracted from SRC-BLOCK and INFO in `org-latex-src-block'."
                                         ?\s)
                            (format "(%s)" ref)))))
               nil (and retain-labels (cdr code-info)))))))
+    ;; Return value.
+    (format float-env body)))
+
+(defun org-latex-src-block--engraved
+    (src-block info _lang caption caption-above-p _label
+               num-start retain-labels attributes float)
+  "Transcode a SRC-BLOCK element from Org to LaTeX, using engrave-faces-latex.
+LANG, CAPTION, CAPTION-ABOVE-P, LABEL, NUM-START, RETAIN-LABELS, ATTRIBUTES
+and FLOAT are extracted from SRC-BLOCK and INFO in `org-latex-src-block'."
+  (let* ((caption-str (org-latex--caption/label-string src-block info))
+         (placement (or (org-unbracket-string "[" "]" (plist-get attributes :placement))
+                        (plist-get info :latex-default-figure-position)))
+         (float-env
+          (cond
+           ((string= "multicolumn" float)
+            (format "\\begin{listing*}[%s]\n%s%%s\n%s\\end{listing*}"
+                    placement
+                    (if caption-above-p caption-str "")
+                    (if caption-above-p "" caption-str)))
+           (caption
+            (format "\\begin{listing}[%s]\n%s%%s\n%s\\end{listing}"
+                    placement
+                    (if caption-above-p caption-str "")
+                    (if caption-above-p "" caption-str)))
+           ((string= "t" float)
+            (concat (format "\\begin{listing}[%s]\n"
+                            placement)
+                    "%s\n\\end{listing}"))
+           (t "%s")))
+         (options (plist-get info :latex-minted-options))
+         (content-buffer
+          (with-temp-buffer
+            (insert
+             (let* ((code-info (org-export-unravel-code src-block))
+                    (max-width
+                     (apply 'max
+                            (mapcar 'length
+                                    (org-split-string (car code-info)
+                                                      "\n")))))
+               (org-export-format-code
+                (car code-info)
+                (lambda (loc _num ref)
+                  (concat
+                   loc
+                   (when ref
+                     ;; Ensure references are flushed to the right,
+                     ;; separated with 6 spaces from the widest line
+                     ;; of code.
+                     (concat (make-string (+ (- max-width (length loc)) 6)
+                                          ?\s)
+                             (format "(%s)" ref)))))
+                nil (and retain-labels (cdr code-info)))))
+            (funcall (org-src-get-lang-mode lang))
+            (engrave-faces-latex-buffer)))
+         (content
+          (with-current-buffer content-buffer
+            (buffer-string)))
+         (body
+          (format
+           "\\begin{Code}\n\\begin{Verbatim}[%s]\n%s\\end{Verbatim}\n\\end{Code}"
+           ;; Options.
+           (concat
+            (org-latex--make-option-string
+             (if (or (not num-start) (assoc "linenos" options))
+                 options
+               (append
+                `(("linenos")
+                  ("firstnumber" ,(number-to-string (1+ num-start))))
+                options)))
+            (let ((local-options (plist-get attributes :options)))
+              (and local-options (concat "," local-options))))
+           content)))
+    (kill-buffer content-buffer)
     ;; Return value.
     (format float-env body)))
 
