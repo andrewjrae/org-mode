@@ -5283,6 +5283,15 @@ by a #."
   :version "24.1"
   :group 'org-appearance)
 
+(defcustom org-inline-src-prettify-results t
+  "Whether to use (ab)use prettify-symbols-mode on {{{results(...)}}}.
+Either t or a cons cell of strings which are used as substitutions
+for the start and end of inline results, respectively."
+  :type '(choice boolean (cons string string))
+  :package-version '(Org . "9.5")
+  :group 'org-appearance
+  :group 'org-babel)
+
 (defun org-fontify-meta-lines-and-blocks (limit)
   (condition-case nil
       (org-fontify-meta-lines-and-blocks-1 limit)
@@ -16351,21 +16360,7 @@ Some of the options can be changed using the variable
 		    (unless (file-exists-p movefile)
 		      (org-create-formula-image
 		       value movefile options forbuffer processing-type))
-		    (if overlays
-			(progn
-			  (dolist (o (overlays-in beg end))
-			    (when (eq (overlay-get o 'org-overlay-type)
-				      'org-latex-overlay)
-			      (delete-overlay o)))
-			  (org--make-preview-overlay beg end movefile imagetype)
-			  (goto-char end))
-		      (delete-region beg end)
-		      (insert
-		       (org-add-props link
-			   (list 'org-latex-src
-				 (replace-regexp-in-string "\"" "" value)
-				 'org-latex-src-embed-type
-				 (if block-type 'paragraph 'character)))))))
+                    (org-place-formula-image link block-type beg end value overlays movefile imagetype)))
 		 ((eq processing-type 'mathml)
 		  ;; Process to MathML.
 		  (unless (org-format-latex-mathml-available-p)
@@ -16379,6 +16374,25 @@ Some of the options can be changed using the variable
 		 (t
 		  (error "Unknown conversion process %s for LaTeX fragments"
 			 processing-type)))))))))))
+
+(defun org-place-formula-image (link block-type beg end value overlays movefile imagetype)
+  "Place an overlay from BEG to END showing MOVEFILE.
+The overlay will be above BEG if OVERLAYS is non-nil."
+  (if overlays
+      (progn
+        (dolist (o (overlays-in beg end))
+          (when (eq (overlay-get o 'org-overlay-type)
+                    'org-latex-overlay)
+            (delete-overlay o)))
+        (org--make-preview-overlay beg end movefile imagetype)
+        (goto-char end))
+    (delete-region beg end)
+    (insert
+     (org-add-props link
+         (list 'org-latex-src
+               (replace-regexp-in-string "\"" "" value)
+               'org-latex-src-embed-type
+               (if block-type 'paragraph 'character))))))
 
 (defun org-create-math-formula (latex-frag &optional mathml-file)
   "Convert LATEX-FRAG to MathML and store it in MATHML-FILE.

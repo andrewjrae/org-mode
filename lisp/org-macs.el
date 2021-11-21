@@ -209,7 +209,7 @@ because otherwise all these markers will point to nowhere."
 
 (defmacro org-no-popups (&rest body)
   "Suppress popup windows and evaluate BODY."
-  `(let (pop-up-frames pop-up-windows)
+  `(let (pop-up-frames display-buffer-alist)
      ,@body))
 
 (defmacro org-element-with-disabled-cache (&rest body)
@@ -261,7 +261,13 @@ ignored in this case."
 ;;; Async stack
 
 (defvar org-async--stack nil
-  "Form: (%PROCESS :success %FUN :failure %FUN :timeout %FLOAT :startttime %FLOAT)")
+  "Form: (%PROCESS :start-time %FLOAT :success %FUN :failure %FUN :timeout %FLOAT :buffer %BUFFER)")
+
+(defvar org-async--wait-queue nil
+   "Form: (%PROCESS :success %FUN :failure %FUN :timeout %FLOAT :buffer %BUFFER)")
+
+(defvar org-async-process-limit 4
+  "Maximum number of processes to run at once.")
 
 (defvar org-async-timeout 120
   "Default timeout for a process started via `org-async-queue'.")
@@ -270,7 +276,7 @@ ignored in this case."
 
 (defvar org-async--counter 0)
 
-(defun org-async-queue (proc &optional success failure timeout)
+(cl-defun org-async (proc &key success failure timeout buffer now)
   "Start PROC and register it with callbacks SUCCESS and FAILURE.
 
 PROC can be a process, string, or list.  A string will be run as a shell command,
@@ -285,40 +291,44 @@ will be run with no arguments.  Should PROC fail, or be killed, the function
 FAILURE will be run with no arguments.  If the process runs for more than
 TIMEOUT seconds, it will be killed and FAILURE run.
 "
-  (let ((proc (cond ((processp proc) proc)
-                    ((stringp proc)
-                     (start-process-shell-command
-                      (format "org-async-%d" (cl-incf org-async--counter))
-                      nil proc))
-                    ((consp proc)
-                     (apply #'start-process
-                            (format "org-async-%s-%d" (car proc) (cl-incf org-async--counter))
-                            nil proc))
-                    (t (error "Asycnc process input %S not a recognised format" proc))))
-        (success (cond ((functionp success) success)
-                       ((stringp success)
-                        `(lambda () (message "%s" ,success)))
-                       (t #'ignore)))
-        (failure (cond ((functionp failure) failure)
-                       ((stringp failure)
-                        `(lambda () (message "%s" ,failure)))
-                       (t #'ignore)))
-        (timeout (or timeout org-async-timeout)))
-    (set-process-sentinel proc #'org-async--sentinel)
-    (push (list proc
-                :success success
-                :failure failure
-                :timeout timeout
-                :start-time (float-time))
-          org-async--stack)
-    (org-async--monitor)))
+  (if (or now (< (length org-async--stack) org-async-process-limit))
+      (let ((proc (cond ((processp proc) proc)
+                        ((stringp proc)
+                         (start-process-shell-command
+                          (format "org-async-%d" (cl-incf org-async--counter))
+                          buffer proc))
+                        ((consp proc)
+                         (apply #'start-process
+                                (format "org-async-%s-%d" (car proc) (cl-incf org-async--counter))
+                                buffer proc))
+                        (t (error "Asycnc process input %S not a recognised format" proc))))
+            (success (cond ((functionp success) success)
+                           ((stringp success)
+                            `(lambda () (message "%s" ,success)))
+                           (t #'ignore)))
+            (failure (cond ((functionp failure) failure)
+                           ((stringp failure)
+                            `(lambda () (message "%s" ,failure)))
+                           (t #'ignore)))
+            (timeout (or timeout org-async-timeout)))
+        (set-process-sentinel proc #'org-async--sentinel)
+        (push (list proc
+                    :success success
+                    :failure failure
+                    :timeout timeout
+                    :start-time (float-time))
+              org-async--stack)
+        (org-async--monitor))
+    (setq org-async--wait-queue
+          (append org-async--wait-queue
+                  (list (list proc :success success :failure failure :timeout timeout :buffer buffer))))))
 
 (defun org-async--sentinel (process signal)
   "Watch PROCESS for death SIGNALs, and call `org-async--cleanup-process' accordingly."
     (pcase (process-status process)
-      ('exit
+      ((and 'exit (guard (= 0 (process-exit-status process))))
        (org-async--cleanup-process process))
-      ((or 'signal 'failed 'nil)
+      ((or 'exit 'signal 'failed)
        (org-async--cleanup-process process t))))
 
 (defun org-async--cleanup-process (process &optional killed)
@@ -329,7 +339,9 @@ the success callback is run.  Otherwise, the failure callback is run."
     (if (and (not killed) (= 0 (process-exit-status process)))
         (funcall (plist-get proc-info :success))
       (funcall (plist-get proc-info :failure))))
-  (setq org-async--stack (delq (assq process org-async--stack) org-async--stack)))
+  (setq org-async--stack (delq (assq process org-async--stack) org-async--stack))
+  (when (and org-async--wait-queue (< org-async-process-limit (length org-async--stack)))
+    (apply #'org-async (pop org-async--wait-queue))))
 
 (defvar org-async--monitor-scheduled nil)
 (defun org-async--monitor (&optional force)
@@ -384,14 +396,15 @@ When PROCESS is a list of commands, optional argument LOG-BUF can
 be set to a buffer or a buffer name.  `shell-command' then uses
 it for output."
   (let ((commands (org-compile-file-commands source process ext spec err-msg))
-        (output (expand-file-name (concat base-name "." ext) out-dir))
+        (output (expand-file-name (concat (file-name-base source) "." ext)
+                                  (or (file-name-directory source) "./")))
         (log-buf (and log-buf (get-buffer-create log-buf)))
         (time (current-time)))
     (save-window-excursion
       (dolist (command commands)
         (cond
          ((functionp command) (funcall command (shell-quote-argument source)))
-         ((stringp command) (shell-command command) log-buf))))
+         ((stringp command) (shell-command command log-buf)))))
     ;; Check for process failure.  Output file is expected to be
     ;; located in the same directory as SOURCE.
     (unless (org-file-newer-than-p output time)
@@ -422,7 +435,7 @@ argument SPEC, as an alist following the pattern
   (let* ((base-name (file-name-base source))
 	 (full-name (file-truename source))
 	 (out-dir (or (file-name-directory source) "./"))
-	 (output (expand-file-name (concat base-name "." ext) out-dir))
+	 (output (expand-file-name (concat (file-name-base source) "." ext) out-dir))
 	 (err-msg (if (stringp err-msg) (concat ".  " err-msg) "")))
       (pcase process
 	((pred functionp) process)
