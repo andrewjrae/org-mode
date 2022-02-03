@@ -970,7 +970,7 @@ URL `https://orgmode.org/worg/org-tutorials/org-latex-preview.html'."
   :type '(choice
 	  (const :tag "Use listings" t)
 	  (const :tag "Use minted" minted)
-	  (const :tag "Use engrave-faces-latex" engrave)
+	  (const :tag "Use engrave-faces-latex" engraved)
 	  (const :tag "Export verbatim" nil))
   :safe (lambda (s) (memq s '(t nil minted))))
 
@@ -1781,13 +1781,13 @@ holding export options."
        (and (stringp template)
             (format-spec template spec)))
      ;; engrave-faces-latex preamble
-     (when (and (eq org-latex-listings 'engave)
+     (when (and (eq org-latex-listings 'engraved)
                 (org-element-map (plist-get info :parse-tree)
                     '(src-block inline-src-block) #'identity))
        (require 'engrave-faces-latex)
        (concat
         org-latex-engraved-code-preamble
-        (engrave-faces-latex-gen-preamble)))
+        (engrave-faces-latex-gen-preamble) "\n"))
      ;; Document start.
      "\\begin{document}\n\n"
      ;; Title command.
@@ -3184,7 +3184,7 @@ and FLOAT are extracted from SRC-BLOCK and INFO in `org-latex-src-block'."
     (format float-env body)))
 
 (defun org-latex-src-block--engraved
-    (src-block info _lang caption caption-above-p _label
+    (src-block info lang caption caption-above-p _label
                num-start retain-labels attributes float)
   "Transcode a SRC-BLOCK element from Org to LaTeX, using engrave-faces-latex.
 LANG, CAPTION, CAPTION-ABOVE-P, LABEL, NUM-START, RETAIN-LABELS, ATTRIBUTES
